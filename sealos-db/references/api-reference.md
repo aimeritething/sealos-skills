@@ -35,10 +35,10 @@ Authorization: <encodeURIComponent(kubeconfigYaml)>
 
 | Field | Type | Range | Default |
 |-------|------|-------|---------|
-| cpu | number | 1, 2, 3, 4, 5, 6, 7, 8 | 1 |
-| memory | number | 0.1 - 32 GB | 1 |
+| cpu | number | enum: 1, 2, 3, 4, 5, 6, 7, 8 | 1 |
+| memory | number | 0.1 - 32 GB (continuous range) | 1 |
 | storage | number | 1 - 300 GB | 3 |
-| replicas | integer | 1 - 20 | 1 |
+| replicas | integer | 1 - 20 | 3 |
 
 ### Update (PATCH /databases/{name})
 
