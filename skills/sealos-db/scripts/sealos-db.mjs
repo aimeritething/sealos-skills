@@ -24,6 +24,8 @@
 //   restart <name>                   Restart a database
 //   enable-public <name>             Enable public access
 //   disable-public <name>            Disable public access
+//   profiles                         List all saved profiles
+//   use <profile>                    Switch active profile
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { request as httpsRequest } from 'node:https';
@@ -34,7 +36,37 @@ import { homedir } from 'node:os';
 const CONFIG_PATH = resolve(homedir(), '.config/sealos-db/config.json');
 const API_PATH = '/api/v2alpha'; // API version — update here if the version changes
 
-// --- config ---
+// --- config (multi-profile) ---
+
+function loadAllConfig() {
+  if (!existsSync(CONFIG_PATH)) return { active: null, profiles: {} };
+  try {
+    const raw = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
+    // Migrate legacy flat format → profiles format
+    if (raw.apiUrl && !raw.profiles) {
+      return { active: 'default', profiles: { default: { kubeconfigPath: raw.kubeconfigPath, apiUrl: raw.apiUrl } } };
+    }
+    return raw;
+  } catch { return { active: null, profiles: {} }; }
+}
+
+function deriveProfileName(apiUrl) {
+  try {
+    const host = new URL(apiUrl).hostname;
+    const parts = host.split('.');
+    // dbprovider.usw.sailos.io → usw.sailos
+    if (parts[0] === 'dbprovider' && parts.length > 2) {
+      return parts.slice(1, -1).join('.');
+    }
+    return parts.slice(0, -1).join('.') || 'default';
+  } catch { return 'default'; }
+}
+
+function writeAllConfig(all) {
+  const dir = resolve(homedir(), '.config/sealos-db');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(CONFIG_PATH, JSON.stringify(all, null, 2) + '\n');
+}
 
 function loadConfig() {
   // Priority 1: env vars
@@ -45,12 +77,11 @@ function loadConfig() {
     };
   }
 
-  // Priority 2: saved config
-  if (existsSync(CONFIG_PATH)) {
-    try {
-      const cfg = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
-      if (cfg.apiUrl && cfg.kubeconfigPath) return cfg;
-    } catch { /* fall through */ }
+  // Priority 2: active profile from saved config
+  const all = loadAllConfig();
+  if (all.active && all.profiles[all.active]) {
+    const p = all.profiles[all.active];
+    if (p.apiUrl && p.kubeconfigPath) return p;
   }
 
   // Priority 3: error
@@ -58,9 +89,12 @@ function loadConfig() {
 }
 
 function saveConfig(kubeconfigPath, apiUrl) {
-  const dir = resolve(homedir(), '.config/sealos-db');
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(CONFIG_PATH, JSON.stringify({ kubeconfigPath, apiUrl }, null, 2) + '\n');
+  const all = loadAllConfig();
+  const name = deriveProfileName(apiUrl);
+  all.profiles[name] = { kubeconfigPath, apiUrl };
+  all.active = name;
+  writeAllConfig(all);
+  return name;
 }
 
 // --- auth ---
@@ -284,8 +318,8 @@ async function init(kubeconfigPath, manualApiUrl) {
     }
   }
 
-  // 4. Save config
-  saveConfig(absPath, apiUrl);
+  // 4. Save config (auto-derives profile name from domain)
+  const profileName = saveConfig(absPath, apiUrl);
 
   // 5. Fetch versions and databases
   const cfg = { apiUrl, kubeconfigPath: absPath };
@@ -296,10 +330,10 @@ async function init(kubeconfigPath, manualApiUrl) {
     databases = await list(cfg);
   } catch (e) {
     // Auth might fail but versions worked — return partial result
-    return { apiUrl, kubeconfigPath: absPath, versions, databases: null, authError: e.message };
+    return { apiUrl, kubeconfigPath: absPath, profileName, versions, databases: null, authError: e.message };
   }
 
-  return { apiUrl, kubeconfigPath: absPath, versions, databases };
+  return { apiUrl, kubeconfigPath: absPath, profileName, versions, databases };
 }
 
 async function createWait(cfg, jsonBody) {
@@ -348,7 +382,7 @@ async function main() {
 
   if (!cmd) {
     console.error('ERROR: Command required.');
-    console.error('Commands: init|list-versions|list|get|create|create-wait|update|delete|start|pause|restart|enable-public|disable-public');
+    console.error('Commands: init|list-versions|list|get|create|create-wait|update|delete|start|pause|restart|enable-public|disable-public|profiles|use');
     process.exit(1);
   }
 
@@ -421,8 +455,35 @@ async function main() {
         break;
       }
 
+      case 'profiles': {
+        const all = loadAllConfig();
+        result = {
+          active: all.active,
+          profiles: Object.entries(all.profiles).map(([name, cfg]) => ({
+            name,
+            apiUrl: cfg.apiUrl,
+            kubeconfigPath: cfg.kubeconfigPath,
+            active: name === all.active,
+          })),
+        };
+        break;
+      }
+
+      case 'use': {
+        const name = requireName(args);
+        const all = loadAllConfig();
+        if (!all.profiles[name]) {
+          const available = Object.keys(all.profiles).join(', ');
+          throw new Error(`Profile '${name}' not found. Available: ${available || '(none)'}`);
+        }
+        all.active = name;
+        writeAllConfig(all);
+        result = { active: name, ...all.profiles[name] };
+        break;
+      }
+
       default:
-        throw new Error(`Unknown command '${cmd}'. Commands: init|list-versions|list|get|create|create-wait|update|delete|start|pause|restart|enable-public|disable-public`);
+        throw new Error(`Unknown command '${cmd}'. Commands: init|list-versions|list|get|create|create-wait|update|delete|start|pause|restart|enable-public|disable-public|profiles|use`);
     }
 
     if (result !== undefined) output(result);

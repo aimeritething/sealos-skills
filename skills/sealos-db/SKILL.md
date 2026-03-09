@@ -62,10 +62,13 @@ Check for a memory file at the project's auto memory directory:
 
 **If memory file exists and contains `kubeconfig_path` + `api_url`:**
 1. Verify the kubeconfig file still exists at the saved path
-2. Run `node scripts/sealos-db.mjs list` (auto-loads config) to test auth
-3. If works → skip Step 1. Greet with context:
-   > Connected to Sealos. You have N databases running.
-4. If fails (401, file missing) → proceed to Step 1, mention the token may have expired
+2. If memory has a `profile` field, ensure the script's active profile matches:
+   run `node scripts/sealos-db.mjs profiles` and compare. If different,
+   run `node scripts/sealos-db.mjs use <profile>` to switch first.
+3. Run `node scripts/sealos-db.mjs list` (auto-loads config) to test auth
+4. If works → skip Step 1. Greet with context:
+   > Connected to Sealos (`{profile}`). You have N databases running.
+5. If fails (401, file missing) → proceed to Step 1, mention the token may have expired
 
 **If no memory file or missing auth fields** → proceed to Step 1.
 
@@ -122,12 +125,34 @@ Run `node scripts/sealos-db.mjs init <kubeconfig_path>`. This single command:
 - Fetches available versions and lists databases
 
 **If auto-detection fails** (error mentions "Could not auto-detect API URL"):
-Ask the user for their Sealos domain, then run with manual URL:
-`node scripts/sealos-db.mjs init <kubeconfig_path> https://dbprovider.<domain>`
+`AskUserQuestion`:
+- header: "API URL"
+- question: "Could not auto-detect API URL. What is your Sealos domain?"
+- useDescription: "Find it in your browser URL bar when logged into Sealos Console (e.g., usw.sailos.io)"
+- options: ["I'll check my Sealos Console"]
 
-If `init` returns an `authError` → kubeconfig expired, re-download.
-The `init` response includes `versions` and `databases` — use these in Step 3
-instead of making separate calls.
+Then run: `node scripts/sealos-db.mjs init <kubeconfig_path> https://dbprovider.<domain>`
+
+**If `init` returns an `authError`** (has `versions` but `databases: null`):
+The API URL is correct but the kubeconfig token has expired. Guide the user:
+
+1. Display:
+   > API connection successful (`{profileName}`), but your kubeconfig token has expired.
+2. `AskUserQuestion`:
+   - header: "Re-authenticate"
+   - question: "Download a fresh kubeconfig to reconnect?"
+   - useDescription: "Go to Sealos Console → Settings → Kubeconfig → Download, save to a file."
+   - options:
+     1. "I've downloaded it — pick file"
+     2. "Cancel"
+3. After user provides new path → re-run `init` with the new kubeconfig path.
+4. Clear the memory file's `Auth` section so stale credentials aren't reused.
+
+**If `init` succeeds fully** (has `versions` and `databases`, no `authError`):
+The response includes `versions`, `databases`, and `profileName`. Display:
+> Connected to Sealos (`{profileName}`). You have N databases.
+
+Use `versions` and `databases` in Step 3 instead of making separate calls.
 
 ---
 
@@ -143,6 +168,7 @@ Determine the operation from user intent:
 | "scale/resize/update resources" | Update |
 | "delete/remove database" | Delete |
 | "start/stop/restart/public access" | Action |
+| "switch cluster/profile/account" | Profile |
 
 If ambiguous, ask one clarifying question.
 
@@ -377,9 +403,15 @@ question: "Apply these changes?"):
 - `delete` policy: cluster removed, data volumes kept
 - `wipeout` policy: everything removed, irreversible
 
-**3d.** Require user to type the database name to confirm. This is the ONE place
-where free-text input is intentionally required for safety — do NOT offer the name as
-a clickable option.
+**3d.** `AskUserQuestion`:
+- header: "Confirm Delete"
+- question: "Type `{name}` to permanently delete this database"
+- options: ["Cancel"] — do NOT include the database name as a clickable option.
+  The user must type the exact name via "Type something" to confirm.
+
+If user types the correct name → proceed to 3e.
+If user types something else → reply "Name doesn't match" and re-ask.
+If user clicks Cancel → abort.
 
 **3e.** Run `node scripts/sealos-db.mjs delete {name}`.
 
@@ -400,6 +432,28 @@ For `enable-public`: re-fetch and display `publicConnection`.
 
 ---
 
+### Profile (Switch Cluster)
+
+The script supports multiple Sealos clusters via named profiles. Each `init` auto-creates
+a profile named after the domain (e.g., `usw.sailos`). Existing profiles are preserved.
+
+**List profiles:** Run `node scripts/sealos-db.mjs profiles`. Display as table:
+
+```
+Profile       API URL                                          Active
+usw.sailos    https://dbprovider.usw.sailos.io/api/v2alpha     ✓
+cn.sailos     https://dbprovider.cn.sailos.io/api/v2alpha
+```
+
+**Switch profile:** `AskUserQuestion` with profile names as options
+(header: "Profile", question: "Which cluster?"). Then run:
+`node scripts/sealos-db.mjs use <name>`
+
+**Add new cluster:** Run Step 1 (Authenticate) with a new kubeconfig.
+`init` auto-creates a new profile from the domain without removing existing ones.
+
+---
+
 ## Step 4: Update Memory
 
 After every successful operation, update the memory file at:
@@ -409,7 +463,7 @@ After every successful operation, update the memory file at:
 
 | Event | Save |
 |-------|------|
-| Successful auth (Step 1) | `kubeconfig_path`, `api_url`, `namespace` |
+| Successful auth (Step 1) | `profile`, `kubeconfig_path`, `api_url`, `namespace` |
 | After create | Add database to list, update `preferred_type` |
 | After delete | Remove database from list |
 | After list/get | Refresh databases list with current state |
@@ -420,6 +474,7 @@ After every successful operation, update the memory file at:
 # Sealos DB Memory
 
 ## Auth
+- profile: usw.sailos
 - kubeconfig_path: ~/sealos-kc.yaml
 - api_url: https://dbprovider.usw.sailos.io/api/v2alpha
 - namespace: ns-xxx
@@ -477,6 +532,10 @@ node $SCRIPT create-wait '{"name":"my-db","type":"postgresql","quota":{"cpu":1,"
 node $SCRIPT update my-db '{"quota":{"cpu":2}}'
 node $SCRIPT delete my-db
 node $SCRIPT start|pause|restart|enable-public|disable-public my-db
+
+# Multi-cluster profile management
+node $SCRIPT profiles               # list all saved profiles
+node $SCRIPT use usw.sailos          # switch active profile
 ```
 
 ## Reference Files
@@ -492,7 +551,7 @@ node $SCRIPT start|pause|restart|enable-public|disable-public my-db
 | Scenario | Action |
 |----------|--------|
 | Kubeconfig not found | Guide user to download from Sealos Console |
-| Auth error (401) | Kubeconfig expired; re-download. Clear memory auth fields. |
+| Auth error (401) | Kubeconfig expired. Follow the `authError` recovery flow in Step 1c: display expiry message, guide user to re-download from Sealos Console → Settings → Kubeconfig, re-run `init`, clear memory auth section. |
 | Name conflict (409) | Suggest alternative name |
 | Invalid specs | Explain constraint, suggest valid value |
 | Storage shrink | Refuse, K8s limitation |
