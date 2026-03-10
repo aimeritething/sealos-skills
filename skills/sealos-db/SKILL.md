@@ -2,10 +2,11 @@
 name: sealos-db
 description: >-
   Use when someone needs to manage databases on Sealos: create, list, update, scale,
-  delete, start, stop, restart, check status, get connection info, or enable/disable
-  public access. Triggers on "I need a database", "create a PostgreSQL on sealos",
-  "scale my database", "delete the database", "show my databases",
-  or "my app needs a database connection".
+  delete, start, stop, restart, check status, get connection info, enable/disable
+  public access, backup/restore databases, or view database logs. Triggers on
+  "I need a database", "create a PostgreSQL on sealos", "scale my database",
+  "delete the database", "show my databases", "backup my database",
+  "restore from backup", "show database logs", or "my app needs a database connection".
 ---
 
 ## Interaction Principle — MANDATORY
@@ -168,6 +169,8 @@ Determine the operation from user intent:
 | "scale/resize/update resources" | Update |
 | "delete/remove database" | Delete |
 | "start/stop/restart/public access" | Action |
+| "backup/restore/list backups" | Backup |
+| "show logs/check errors/slow queries" | Logs |
 | "switch cluster/profile/account" | Profile |
 
 If ambiguous, ask one clarifying question.
@@ -432,6 +435,110 @@ For `enable-public`: re-fetch and display `publicConnection`.
 
 ---
 
+### Backup
+
+**3a.** If no database name given → List, then `AskUserQuestion` to pick which database
+(options = database names from list).
+
+**3b.** `AskUserQuestion` (header: "Backup", question: "What would you like to do?"):
+- "List backups"
+- "Create backup"
+- "Restore from backup"
+- "Delete backup"
+
+**List backups:**
+Run `node scripts/sealos-db.mjs list-backups {name}`. Format as table:
+
+```
+Name                              Status      Created
+my-db-backup-20240115             completed   2024-01-15T02:00:00Z
+my-db-backup-20240120             completed   2024-01-20T02:00:00Z
+```
+
+Highlight non-completed statuses (inprogress, failed).
+
+**Create backup:**
+`AskUserQuestion` (header: "Backup Description", question: "Optional description? (max 31 chars)"):
+- "Skip (no description)"
+- "Pre-migration backup"
+- "Manual snapshot"
+
+Run `node scripts/sealos-db.mjs create-backup {name} '{"description":"..."}'` (omit body if skipped).
+Confirm success.
+
+**Delete backup:**
+Run `node scripts/sealos-db.mjs list-backups {name}` first to show available backups.
+`AskUserQuestion` with backup names as options (header: "Delete Backup", question: "Which backup to delete?").
+Then confirm:
+`AskUserQuestion` (header: "Confirm", question: "Delete backup '{backupName}'?"):
+- "Delete"
+- "Cancel"
+
+Run `node scripts/sealos-db.mjs delete-backup {name} {backupName}`.
+
+**Restore from backup:**
+Run `node scripts/sealos-db.mjs list-backups {name}` first to show available backups.
+`AskUserQuestion` with backup names (status=completed only) as options
+(header: "Restore", question: "Which backup to restore from?").
+
+Then `AskUserQuestion` (header: "Restore Config", question: "Restore with defaults?"):
+- "Restore now (auto-name, same replicas)" — proceed with empty body
+- "Customize name & replicas"
+
+If customize: ask for new database name and replica count via `AskUserQuestion`.
+
+Warn that restore creates a **new** database instance:
+> This will create a new database from the backup. The original database is not affected.
+
+`AskUserQuestion` (header: "Confirm Restore", question: "Restore from '{backupName}'?"):
+- "Restore now"
+- "Cancel"
+
+Run `node scripts/sealos-db.mjs restore-backup {name} {backupName} '{"name":"...","replicas":N}'`.
+
+---
+
+### Logs
+
+**3a.** If no database name given → List, then `AskUserQuestion` to pick which database
+(options = database names from list).
+
+**3b.** Get database details: run `node scripts/sealos-db.mjs get {name}` to determine
+the database type. Map the type to log dbType parameter:
+- `postgresql` → `postgresql`
+- `apecloud-mysql` → `mysql`
+- `mongodb` → `mongodb`
+- `redis` → `redis`
+- Other types → inform user that logs are only supported for mysql, mongodb, redis, postgresql
+
+**3c.** `AskUserQuestion` (header: "Log Type", question: "Which logs?"):
+- "Runtime logs" — logType: `runtimeLog`
+- "Slow queries" — logType: `slowQuery`
+- "Error logs" — logType: `errorLog`
+
+**3d.** List log files: run `node scripts/sealos-db.mjs log-files {podName} {dbType} {logType}`.
+
+The `podName` comes from the database's pod name (typically `{name}-{type}-0` or similar,
+available from the `get` response). If unsure, use `{name}-{type}-0` as default.
+
+Display available log files. If multiple files, `AskUserQuestion` with file paths as options
+(header: "Log File", question: "Which log file?"). If only one, use it directly.
+
+**3e.** Fetch logs: run `node scripts/sealos-db.mjs logs {podName} {dbType} {logType} {logPath}`.
+
+Display log entries in a readable format:
+```
+[2024-01-15 02:00:00] [LOG]   checkpoint starting: xlog
+[2024-01-15 02:00:01] [ERROR] connection reset by peer
+```
+
+If `hasMore` is true in the response metadata, offer to fetch more:
+`AskUserQuestion` (header: "More Logs", question: "Load more log entries?"):
+- "Next page"
+- "Done"
+
+---
+
 ### Profile (Switch Cluster)
 
 The script supports multiple Sealos clusters via named profiles. Each `init` auto-creates
@@ -532,6 +639,17 @@ node $SCRIPT create-wait '{"name":"my-db","type":"postgresql","quota":{"cpu":1,"
 node $SCRIPT update my-db '{"quota":{"cpu":2}}'
 node $SCRIPT delete my-db
 node $SCRIPT start|pause|restart|enable-public|disable-public my-db
+
+# Backup management
+node $SCRIPT list-backups my-db
+node $SCRIPT create-backup my-db '{"description":"pre-migration"}'
+node $SCRIPT delete-backup my-db my-db-backup-20240115
+node $SCRIPT restore-backup my-db my-db-backup-20240115 '{"name":"my-db-restored","replicas":3}'
+
+# Log retrieval
+node $SCRIPT log-files my-db-postgresql-0 postgresql runtimeLog
+node $SCRIPT logs my-db-postgresql-0 postgresql runtimeLog /var/log/postgresql.log
+node $SCRIPT logs my-db-postgresql-0 postgresql slowQuery /var/log/slow.log 1 50
 
 # Multi-cluster profile management
 node $SCRIPT profiles               # list all saved profiles

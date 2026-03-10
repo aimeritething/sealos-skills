@@ -24,6 +24,12 @@
 //   restart <name>                   Restart a database
 //   enable-public <name>             Enable public access
 //   disable-public <name>            Disable public access
+//   list-backups <name>              List backups for a database
+//   create-backup <name> [json]     Create a backup (optional: {"description":"...","name":"..."})
+//   delete-backup <name> <backup>   Delete a specific backup
+//   restore-backup <name> <backup> [json]  Restore from backup (optional: {"name":"...","replicas":N})
+//   log-files <name> <dbType> <logType>    List log files for a database pod
+//   logs <name> <dbType> <logType> <logPath> [page] [pageSize]  Get log entries
 //   profiles                         List all saved profiles
 //   use <profile>                    Switch active profile
 
@@ -314,6 +320,71 @@ async function action(cfg, name, actionName) {
   return { success: true, message: `Action '${actionName}' on '${name}' completed` };
 }
 
+// --- backup commands ---
+
+async function listBackups(cfg, name) {
+  const auth = getEncodedKubeconfig(cfg.kubeconfigPath);
+  const res = await apiCall('GET', `/databases/${name}/backups`, { apiUrl: cfg.apiUrl, auth });
+  if (res.status !== 200) throw new Error(`HTTP ${res.status}: ${JSON.stringify(res.body)}`);
+  return res.body;
+}
+
+async function createBackup(cfg, name, jsonBody) {
+  const body = jsonBody ? (typeof jsonBody === 'string' ? JSON.parse(jsonBody) : jsonBody) : {};
+  if (body.description && body.description.length > 31) {
+    throw new Error('Validation failed: description must be at most 31 characters (Kubernetes label limit)');
+  }
+  const auth = getEncodedKubeconfig(cfg.kubeconfigPath);
+  const res = await apiCall('POST', `/databases/${name}/backups`, { apiUrl: cfg.apiUrl, auth, body });
+  if (res.status !== 204) throw new Error(`HTTP ${res.status}: ${JSON.stringify(res.body)}`);
+  return { success: true, message: `Backup created for '${name}'` };
+}
+
+async function deleteBackup(cfg, name, backupName) {
+  const auth = getEncodedKubeconfig(cfg.kubeconfigPath);
+  const res = await apiCall('DELETE', `/databases/${name}/backups/${backupName}`, { apiUrl: cfg.apiUrl, auth });
+  if (res.status !== 204) throw new Error(`HTTP ${res.status}: ${JSON.stringify(res.body)}`);
+  return { success: true, message: `Backup '${backupName}' deleted from '${name}'` };
+}
+
+async function restoreBackup(cfg, name, backupName, jsonBody) {
+  const body = jsonBody ? (typeof jsonBody === 'string' ? JSON.parse(jsonBody) : jsonBody) : {};
+  const auth = getEncodedKubeconfig(cfg.kubeconfigPath);
+  const res = await apiCall('POST', `/databases/${name}/backups/${backupName}/restore`, { apiUrl: cfg.apiUrl, auth, body });
+  if (res.status !== 204) throw new Error(`HTTP ${res.status}: ${JSON.stringify(res.body)}`);
+  return { success: true, message: `Restore from backup '${backupName}' initiated` };
+}
+
+// --- log commands ---
+
+async function listLogFiles(cfg, podName, dbType, logType) {
+  const validDbTypes = ['mysql', 'mongodb', 'redis', 'postgresql'];
+  const validLogTypes = ['runtimeLog', 'slowQuery', 'errorLog'];
+  if (!validDbTypes.includes(dbType)) throw new Error(`dbType must be one of: ${validDbTypes.join(', ')}`);
+  if (!validLogTypes.includes(logType)) throw new Error(`logType must be one of: ${validLogTypes.join(', ')}`);
+
+  const auth = getEncodedKubeconfig(cfg.kubeconfigPath);
+  const query = `?podName=${encodeURIComponent(podName)}&dbType=${encodeURIComponent(dbType)}&logType=${encodeURIComponent(logType)}`;
+  const res = await apiCall('GET', `/logs/files${query}`, { apiUrl: cfg.apiUrl, auth });
+  if (res.status !== 200) throw new Error(`HTTP ${res.status}: ${JSON.stringify(res.body)}`);
+  return res.body;
+}
+
+async function getLogs(cfg, podName, dbType, logType, logPath, page, pageSize) {
+  const validDbTypes = ['mysql', 'mongodb', 'redis', 'postgresql'];
+  const validLogTypes = ['runtimeLog', 'slowQuery', 'errorLog'];
+  if (!validDbTypes.includes(dbType)) throw new Error(`dbType must be one of: ${validDbTypes.join(', ')}`);
+  if (!validLogTypes.includes(logType)) throw new Error(`logType must be one of: ${validLogTypes.join(', ')}`);
+
+  const auth = getEncodedKubeconfig(cfg.kubeconfigPath);
+  let query = `?podName=${encodeURIComponent(podName)}&dbType=${encodeURIComponent(dbType)}&logType=${encodeURIComponent(logType)}&logPath=${encodeURIComponent(logPath)}`;
+  if (page) query += `&page=${encodeURIComponent(page)}`;
+  if (pageSize) query += `&pageSize=${encodeURIComponent(pageSize)}`;
+  const res = await apiCall('GET', `/logs${query}`, { apiUrl: cfg.apiUrl, auth });
+  if (res.status !== 200) throw new Error(`HTTP ${res.status}: ${JSON.stringify(res.body)}`);
+  return res.body;
+}
+
 // --- batch commands ---
 
 async function init(kubeconfigPath, manualApiUrl) {
@@ -418,7 +489,7 @@ async function main() {
 
   if (!cmd) {
     console.error('ERROR: Command required.');
-    console.error('Commands: init|list-versions|list|get|create|create-wait|update|delete|start|pause|restart|enable-public|disable-public|profiles|use');
+    console.error('Commands: init|list-versions|list|get|create|create-wait|update|delete|start|pause|restart|enable-public|disable-public|list-backups|create-backup|delete-backup|restore-backup|log-files|logs|profiles|use');
     process.exit(1);
   }
 
@@ -491,6 +562,55 @@ async function main() {
         break;
       }
 
+      case 'list-backups': {
+        const cfg = requireConfig(false);
+        const name = requireName(args);
+        result = await listBackups(cfg, name);
+        break;
+      }
+
+      case 'create-backup': {
+        const cfg = requireConfig(false);
+        const name = requireName(args);
+        result = await createBackup(cfg, name, args[1]);
+        break;
+      }
+
+      case 'delete-backup': {
+        const cfg = requireConfig(false);
+        const name = requireName(args);
+        if (!args[1]) throw new Error('Backup name required');
+        result = await deleteBackup(cfg, name, args[1]);
+        break;
+      }
+
+      case 'restore-backup': {
+        const cfg = requireConfig(false);
+        const name = requireName(args);
+        if (!args[1]) throw new Error('Backup name required');
+        result = await restoreBackup(cfg, name, args[1], args[2]);
+        break;
+      }
+
+      case 'log-files': {
+        const cfg = requireConfig(false);
+        const podName = requireName(args);
+        if (!args[1]) throw new Error('dbType required (mysql|mongodb|redis|postgresql)');
+        if (!args[2]) throw new Error('logType required (runtimeLog|slowQuery|errorLog)');
+        result = await listLogFiles(cfg, podName, args[1], args[2]);
+        break;
+      }
+
+      case 'logs': {
+        const cfg = requireConfig(false);
+        const podName = requireName(args);
+        if (!args[1]) throw new Error('dbType required (mysql|mongodb|redis|postgresql)');
+        if (!args[2]) throw new Error('logType required (runtimeLog|slowQuery|errorLog)');
+        if (!args[3]) throw new Error('logPath required');
+        result = await getLogs(cfg, podName, args[1], args[2], args[3], args[4], args[5]);
+        break;
+      }
+
       case 'profiles': {
         const all = loadAllConfig();
         result = {
@@ -519,7 +639,7 @@ async function main() {
       }
 
       default:
-        throw new Error(`Unknown command '${cmd}'. Commands: init|list-versions|list|get|create|create-wait|update|delete|start|pause|restart|enable-public|disable-public|profiles|use`);
+        throw new Error(`Unknown command '${cmd}'. Commands: init|list-versions|list|get|create|create-wait|update|delete|start|pause|restart|enable-public|disable-public|list-backups|create-backup|delete-backup|restore-backup|log-files|logs|profiles|use`);
     }
 
     if (result !== undefined) output(result);

@@ -133,6 +133,101 @@ Actions: `start`, `pause`, `restart`, `enable-public`, `disable-public`
 
 Response: `204 No Content` (all idempotent)
 
+### GET /databases/{name}/backups -- List Backups
+
+Response: `200 OK` -> Array of `{ name, description, createdAt, status }`
+
+Status values: `completed`, `inprogress`, `failed`, `unknown`, `running`, `deleting`
+
+### POST /databases/{name}/backups -- Create Backup
+
+```json
+{
+  "description": "pre-migration snapshot",
+  "name": "my-custom-backup-name"
+}
+```
+
+Both fields are optional. Description max 31 characters (Kubernetes label limit).
+Name auto-generated if omitted.
+
+Response: `204 No Content`
+
+### DELETE /databases/{name}/backups/{backupName} -- Delete Backup
+
+Response: `204 No Content`
+
+### POST /databases/{name}/backups/{backupName}/restore -- Restore from Backup
+
+Creates a **new** database instance from the backup. The original database is not affected.
+
+```json
+{
+  "name": "my-db-restored",
+  "replicas": 3
+}
+```
+
+Both fields are optional. Name auto-generated if omitted. Replicas inherited from source if omitted.
+
+Response: `204 No Content`
+
+### GET /logs -- Get Database Log Entries
+
+Query parameters (all required unless noted):
+- `podName` (required) — Pod name to retrieve logs from
+- `dbType` (required) — `mysql`, `mongodb`, `redis`, or `postgresql`
+- `logType` (required) — `runtimeLog`, `slowQuery`, or `errorLog`
+- `logPath` (required) — Absolute path to the log file within the pod
+- `page` (optional, default: 1) — Page number for pagination
+- `pageSize` (optional, default: 100, max: 1000) — Entries per page
+
+Response: `200 OK`
+
+```json
+{
+  "code": 200,
+  "message": "ok",
+  "data": {
+    "logs": [
+      { "timestamp": "2024-01-15T02:00:00Z", "level": "LOG", "content": "checkpoint starting" }
+    ],
+    "metadata": {
+      "total": 1500,
+      "page": 1,
+      "pageSize": 100,
+      "processingTime": "50ms",
+      "hasMore": true
+    }
+  }
+}
+```
+
+### GET /logs/files -- List Log Files
+
+Query parameters (all required):
+- `podName` (required) — Pod name to list log files from
+- `dbType` (required) — `mysql`, `mongodb`, `redis`, or `postgresql`
+- `logType` (required) — `runtimeLog`, `slowQuery`, or `errorLog`
+
+Response: `200 OK`
+
+```json
+{
+  "code": 200,
+  "message": "ok",
+  "data": [
+    {
+      "name": "postgresql.log",
+      "path": "/var/log/postgresql/postgresql.log",
+      "dir": "/var/log/postgresql",
+      "size": 1048576,
+      "updateTime": "2024-01-15T02:00:00Z"
+    }
+  ]
+}
+```
+
 ## Error Response Format
 
 ```json
