@@ -68,7 +68,10 @@ Check for a memory file named `sealos-template.md` in the project's auto memory 
    > Connected to Sealos (`{profile}`). {N} templates available.
 5. If fails → proceed to Step 1, mention connection issue
 
-**If no memory file or missing auth fields** → proceed to Step 1.
+**If no memory file or missing auth fields:**
+1. Run `node scripts/sealos-auth.mjs check`
+2. If `authenticated: true` → skip to Step 1b (init with `~/.sealos/kubeconfig`)
+3. If `authenticated: false` → proceed to Step 1a
 
 **Note:** Browsing is public (no auth needed). Auth is only validated on deploy operations.
 If memory has `api_url` but no `kubeconfig_path`, browsing still works — only prompt for
@@ -80,46 +83,31 @@ kubeconfig when the user wants to deploy.
 
 Run this step only if Step 0 found no valid memory.
 
-### 1a. Get kubeconfig file path
+### 1a. OAuth2 Login
 
-Check if these common paths exist: `~/.kube/config`, `~/sealos-kc.yaml`, `~/kubeconfig.yaml`
+Run `node scripts/sealos-auth.mjs login`.
 
-**STOP. Do NOT read any kubeconfig file yet. Do NOT proceed to Step 1b.**
-**You MUST call `AskUserQuestion` first and WAIT for the user to confirm which file.**
+This command:
+1. Opens the user's browser to the Sealos authorization page
+2. Displays a user code and verification URL in stderr
+3. Polls until the user approves (max 10 minutes)
+4. Exchanges the token for a kubeconfig
+5. Saves to `~/.sealos/kubeconfig`
 
+Display while waiting:
+> Opening browser for Sealos login... Approve the request in your browser.
+
+**If TLS error**: Retry with `node scripts/sealos-auth.mjs login --insecure`
+
+**If other error**:
 `AskUserQuestion`:
-- header: "Kubeconfig"
-- question: "Where is your Sealos kubeconfig file?"
-- useDescription: "Download from Sealos Console > Settings > Kubeconfig, save to a file. Do not paste content."
-- options: list any of the above paths that **exist on disk**, then always add:
-  - `"I'll save it now — tell me where"`
-- Example (if `~/.kube/config` exists):
-  ```
-  ["~/.kube/config", "I'll save it now — tell me where"]
-  ```
-- Example (if none exist):
-  ```
-  ["I'll save it now — tell me where"]
-  ```
+- header: "Login Failed"
+- question: "Browser login failed. Try again?"
+- options: ["Try again", "Cancel"]
 
-**Only after the user picks or types a path → proceed to Step 1b.**
+### 1b. Init (derive API URL + validate connection)
 
-**If user pastes kubeconfig content instead of a path:** Explain that the API needs the
-original YAML byte-for-byte and terminal pasting corrupts it. Ask them to save to a file.
-
-### 1b. Validate identity
-
-Read the kubeconfig file. Parse the YAML to extract:
-- `server` URL (from `clusters[0].cluster.server`)
-- **User context name** (from `users[0].name` or `contexts[0].context.user`)
-
-If user is `kubernetes-admin` or any cluster admin identity → **STOP**:
-> This is a cluster admin kubeconfig. The Template API needs a Sealos user kubeconfig
-> (download from Sealos Console > Settings > Kubeconfig).
-
-### 1c. Init (derive API URL + validate connection)
-
-Run `node scripts/sealos-template.mjs init <kubeconfig_path>`. This single command:
+Run `node scripts/sealos-template.mjs init ~/.sealos/kubeconfig`. This single command:
 - Parses the kubeconfig, extracts the server URL
 - **Auto-probes** candidate API URLs (tries `template.<domain>` with subdomain
   variations) and uses the first one that responds successfully
@@ -133,7 +121,7 @@ Run `node scripts/sealos-template.mjs init <kubeconfig_path>`. This single comma
 - useDescription: "Find it in your browser URL bar when logged into Sealos Console (e.g., usw.sailos.io)"
 - options: ["I'll check my Sealos Console"]
 
-Then run: `node scripts/sealos-template.mjs init <kubeconfig_path> https://template.<domain>`
+Then run: `node scripts/sealos-template.mjs init ~/.sealos/kubeconfig https://template.<domain>`
 
 **If `init` succeeds:**
 The response includes `profileName` and `templateCount`. Display:
@@ -252,8 +240,15 @@ cn.sailos     https://template.cn.sailos.io/api/v2alpha
 (header: "Profile", question: "Which cluster?"). Then run:
 `node scripts/sealos-template.mjs use <name>`
 
-**Add new cluster:** Run Step 1 (Authenticate) with a new kubeconfig.
-`init` auto-creates a new profile from the domain without removing existing ones.
+**Add new cluster:** `AskUserQuestion`:
+- header: "Add Cluster"
+- question: "How to connect to the new cluster?"
+- options: ["OAuth2 Login (Recommended)", "Use existing kubeconfig file"]
+
+If "OAuth2 Login" → run Step 1a (OAuth2 login), then Step 1b (init with `~/.sealos/kubeconfig`).
+If "Use existing kubeconfig file" → `AskUserQuestion` asking for the file path, then run
+`node scripts/sealos-template.mjs init <path>`. `init` auto-creates a new profile from the domain
+without removing existing ones.
 
 ---
 
@@ -276,8 +271,9 @@ in the project's auto memory directory.
 # Sealos Template Memory
 
 ## Auth
+- auth_method: oauth2
 - profile: usw.sailos
-- kubeconfig_path: ~/sealos-kc.yaml
+- kubeconfig_path: ~/.sealos/kubeconfig
 - api_url: https://template.usw.sailos.io/api/v2alpha
 
 ## Recent Deploys
@@ -291,9 +287,21 @@ in the project's auto memory directory.
 
 ---
 
-## Script
+## Scripts
 
-Single entry point: `scripts/sealos-template.mjs` (relative to this skill's directory).
+Two entry points in `scripts/` (relative to this skill's directory):
+- `sealos-auth.mjs` — OAuth2 Device Grant login (shared across all skills)
+- `sealos-template.mjs` — Template browsing and deployment operations
+
+**Auth commands:**
+```bash
+node $SCRIPTS/sealos-auth.mjs check              # Check if authenticated
+node $SCRIPTS/sealos-auth.mjs login               # Start OAuth2 login
+node $SCRIPTS/sealos-auth.mjs login --insecure    # Skip TLS verification
+node $SCRIPTS/sealos-auth.mjs info                # Show auth details
+```
+
+Single entry point for Template operations: `scripts/sealos-template.mjs`.
 Zero external dependencies (Node.js only).
 TLS certificate verification is disabled (`rejectUnauthorized: false`) because Sealos
 clusters may use self-signed certificates. See `references/api-reference.md` for details.
@@ -315,10 +323,10 @@ then run: `node /Users/x/project/.claude/skills/sealos-template/scripts/sealos-t
 SCRIPT="/path/from/additional-working-dirs/sealos-template.mjs"
 
 # First-time setup — auto-probes API URL, saves config, returns template count
-node $SCRIPT init ~/sealos-kc.yaml
+node $SCRIPT init ~/.sealos/kubeconfig
 
 # First-time setup with manual API URL (if auto-probe fails)
-node $SCRIPT init ~/sealos-kc.yaml https://template.your-domain.com
+node $SCRIPT init ~/.sealos/kubeconfig https://template.your-domain.com
 
 # After init, no env vars needed — config is auto-loaded
 node $SCRIPT list                          # list all templates (public, no auth)
@@ -348,7 +356,7 @@ node $SCRIPT use usw.sailos          # switch active profile
 |-------------|------------|--------|
 | 400 | INVALID_PARAMETER | Show which field is invalid from details array, re-ask |
 | 400 | INVALID_VALUE | Show validation message (e.g., name format rules), re-ask |
-| 401 | AUTHENTICATION_REQUIRED | Kubeconfig invalid/expired → re-auth flow |
+| 401 | AUTHENTICATION_REQUIRED | Run `node scripts/sealos-auth.mjs login` to re-authenticate |
 | 403 | PERMISSION_DENIED | Show details, suggest checking permissions |
 | 404 | NOT_FOUND | Template doesn't exist in catalog, show list for user to pick |
 | 409 | ALREADY_EXISTS | Instance name taken, ask for alternative name |
@@ -359,9 +367,8 @@ node $SCRIPT use usw.sailos          # switch active profile
 ## Rules
 
 - NEVER ask a question as plain text — ALWAYS use `AskUserQuestion` with options
-- NEVER read `~/.kube/config` or any kubeconfig without asking the user first via `AskUserQuestion`
+- NEVER ask user to manually download kubeconfig — always use `scripts/sealos-auth.mjs login`
 - NEVER run `test -f` on the skill script — it is always present, just run it
-- NEVER accept pasted kubeconfig — API requires exact original YAML; pasting corrupts it
 - NEVER write kubeconfig to `~/.kube/config` — may overwrite user's existing config
 - NEVER echo kubeconfig content to output
 - NEVER construct HTTP requests inline — always use `scripts/sealos-template.mjs`
